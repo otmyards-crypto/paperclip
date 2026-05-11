@@ -313,7 +313,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           pausedAt: null,
           updatedAt: now,
         })
-        .where(and(eq(agents.id, policy.scopeId), eq(agents.pauseReason, "budget")));
+        // Only auto-resume if budget is the sole pause reason — skip when operator has set manualPauseOverride
+        .where(and(eq(agents.id, policy.scopeId), eq(agents.pauseReason, "budget"), eq(agents.manualPauseOverride, false)));
       return;
     }
 
@@ -325,7 +326,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           pausedAt: null,
           updatedAt: now,
         })
-        .where(and(eq(projects.id, policy.scopeId), eq(projects.pauseReason, "budget")));
+        .where(and(eq(projects.id, policy.scopeId), eq(projects.pauseReason, "budget"), eq(projects.manualPauseOverride, false)));
       return;
     }
 
@@ -337,7 +338,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         pausedAt: null,
         updatedAt: now,
       })
-      .where(and(eq(companies.id, policy.scopeId), eq(companies.pauseReason, "budget")));
+      .where(and(eq(companies.id, policy.scopeId), eq(companies.pauseReason, "budget"), eq(companies.manualPauseOverride, false)));
   }
 
   async function getPolicyRow(policyId: string) {
