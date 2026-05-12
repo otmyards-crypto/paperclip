@@ -308,4 +308,256 @@ describe("budgetService", () => {
       }),
     );
   });
+
+  it("does not act on a non-terminal heartbeat run", async () => {
+    const dbStub = createDbStub([]);
+
+    const service = budgetService(dbStub.db as any);
+    await service.evaluateHeartbeatRunFinalized({
+      companyId: "company-1",
+      agentId: "agent-1",
+      status: "running",
+    });
+
+    expect(dbStub.db.select).not.toHaveBeenCalled();
+  });
+
+  it("creates a hard-stop incident and pauses an agent when heartbeat-count cap is reached", async () => {
+    const policy = {
+      id: "policy-hb-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "heartbeat_count",
+      windowKind: "calendar_day_utc",
+      amount: 20,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: false,
+      isActive: true,
+    };
+
+    const dbStub = createDbStub([
+      [policy],
+      [{ total: 20 }],
+      [],
+      [{
+        companyId: "company-1",
+        name: "Compliance-1",
+        status: "running",
+        pauseReason: null,
+      }],
+    ]);
+
+    dbStub.queueInsert([{
+      id: "approval-hb-1",
+      companyId: "company-1",
+      status: "pending",
+    }]);
+    dbStub.queueInsert([{
+      id: "incident-hb-1",
+      companyId: "company-1",
+      policyId: "policy-hb-1",
+      approvalId: "approval-hb-1",
+    }]);
+    dbStub.queueUpdate([]);
+    const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+
+    const service = budgetService(dbStub.db as any, { cancelWorkForScope });
+    await service.evaluateHeartbeatRunFinalized({
+      companyId: "company-1",
+      agentId: "agent-1",
+      status: "succeeded",
+    });
+
+    expect(dbStub.insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        type: "budget_override_required",
+        status: "pending",
+      }),
+    );
+    expect(dbStub.insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        policyId: "policy-hb-1",
+        thresholdType: "hard",
+        amountLimit: 20,
+        amountObserved: 20,
+        approvalId: "approval-hb-1",
+      }),
+    );
+    expect(dbStub.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "paused",
+        pauseReason: "budget",
+        pausedAt: expect.any(Date),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "budget.hard_threshold_crossed",
+        entityId: "incident-hb-1",
+        details: expect.objectContaining({
+          metric: "heartbeat_count",
+          windowKind: "calendar_day_utc",
+        }),
+      }),
+    );
+    expect(cancelWorkForScope).toHaveBeenCalledWith({
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+    });
+  });
+
+  it("blocks new work when an agent heartbeat-count cap is still exceeded", async () => {
+    const policy = {
+      id: "policy-hb-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "heartbeat_count",
+      windowKind: "calendar_day_utc",
+      amount: 20,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    };
+
+    const dbStub = createDbStub([
+      [{
+        status: "running",
+        pauseReason: null,
+        companyId: "company-1",
+        name: "Compliance-1",
+      }],
+      [{
+        status: "active",
+        name: "Paperclip",
+      }],
+      [],
+      [policy],
+      [{ total: 20 }],
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1");
+
+    expect(block).toEqual({
+      scopeType: "agent",
+      scopeId: "agent-1",
+      scopeName: "Compliance-1",
+      reason: "Agent cannot start because its budget hard-stop is still exceeded.",
+    });
+  });
+
+  it("F-111: does NOT auto-resume a budget-paused agent when operator has set manualPauseOverride", async () => {
+    // Scenario: budget paused agent, operator also explicitly paused (manualPauseOverride=true),
+    // then budget window resets — agent must stay paused despite observed < amount.
+    const policy = {
+      id: "policy-hb-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "heartbeat_count",
+      windowKind: "calendar_day_utc",
+      amount: 20,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    };
+
+    const dbStub = createDbStub([
+      [{
+        status: "paused",
+        pauseReason: "budget",
+        manualPauseOverride: true,
+        companyId: "company-1",
+        name: "Compliance-1",
+      }],
+      [{ status: "active", name: "Paperclip" }],
+      [],
+      [policy],
+      [{ total: 0 }],
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1");
+
+    // Budget block is cleared (window reset), so getInvocationBlock returns null.
+    expect(block).toBeNull();
+
+    // resumeScopeFromBudget IS called, but its WHERE clause now includes
+    // `eq(agents.manualPauseOverride, false)`.  In a real DB that WHERE
+    // condition would match 0 rows (override=true) so the agent stays paused.
+    // Here we confirm the set call happened for the resume path…
+    expect(dbStub.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "idle", pauseReason: null }),
+    );
+    // …and that the WHERE arg passed to the chained where() references the
+    // manualPauseOverride column guard in its Drizzle SQL expression tree.
+    const whereSpyFn = dbStub.updateSet.mock.results[0]?.value?.where as ReturnType<typeof vi.fn>;
+    expect(whereSpyFn).toBeDefined();
+    const whereCondition = whereSpyFn?.mock?.calls?.[0]?.[0];
+    expect(whereCondition).toBeDefined();
+    // Drizzle SQL expressions are circular; walk with a visited-set guard.
+    function containsColumn(node: unknown, col: string, visited = new WeakSet()): boolean {
+      if (!node || typeof node !== "object") return false;
+      if (visited.has(node as object)) return false;
+      visited.add(node as object);
+      const obj = node as Record<string, unknown>;
+      if (typeof obj["name"] === "string" && obj["name"] === col) return true;
+      return Object.values(obj).some((v) => containsColumn(v, col, visited));
+    }
+    expect(containsColumn(whereCondition, "manual_pause_override")).toBe(true);
+  });
+
+  it("lazy-unblocks a budget-paused agent once its heartbeat-count window resets", async () => {
+    const policy = {
+      id: "policy-hb-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "heartbeat_count",
+      windowKind: "calendar_day_utc",
+      amount: 20,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    };
+
+    const dbStub = createDbStub([
+      [{
+        status: "paused",
+        pauseReason: "budget",
+        companyId: "company-1",
+        name: "Compliance-1",
+      }],
+      [{
+        status: "active",
+        name: "Paperclip",
+      }],
+      [],
+      [policy],
+      [{ total: 0 }],
+    ]);
+    dbStub.queueUpdate([]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1");
+
+    expect(block).toBeNull();
+    expect(dbStub.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "idle",
+        pauseReason: null,
+        pausedAt: null,
+      }),
+    );
+  });
 });

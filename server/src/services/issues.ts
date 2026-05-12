@@ -123,6 +123,7 @@ export interface IssueFilters {
   assigneeAgentId?: string;
   participantAgentId?: string;
   assigneeUserId?: string;
+  createdByUserId?: string;
   touchedByUserId?: string;
   inboxArchivedByUserId?: string;
   unreadForUserId?: string;
@@ -2287,6 +2288,9 @@ export function issueService(db: Db) {
       }
       if (filters?.assigneeUserId) {
         conditions.push(eq(issues.assigneeUserId, filters.assigneeUserId));
+      }
+      if (filters?.createdByUserId) {
+        conditions.push(eq(issues.createdByUserId, filters.createdByUserId));
       }
       if (touchedByUserId) {
         conditions.push(touchedByUserCondition(companyId, touchedByUserId));
