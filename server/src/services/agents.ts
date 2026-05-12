@@ -453,6 +453,8 @@ export function agentService(db: Db) {
           pauseReason: reason,
           pausedAt: new Date(),
           updatedAt: new Date(),
+          // Operator-initiated pauses lock the agent against budget auto-resume
+          manualPauseOverride: reason === "manual",
         })
         .where(eq(agents.id, id))
         .returning()
@@ -474,6 +476,7 @@ export function agentService(db: Db) {
           status: "idle",
           pauseReason: null,
           pausedAt: null,
+          manualPauseOverride: false,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id))
