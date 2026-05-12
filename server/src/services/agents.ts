@@ -364,6 +364,12 @@ export function agentService(db: Db) {
       const role = (data.role ?? existing.role) as string;
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions, role);
     }
+    // F-111: a PATCH that sets status='paused' without an explicit pauseReason must not
+    // retain a stale 'budget' reason — stamp 'manual' so getInvocationBlock() cannot
+    // silently auto-resume this agent when the budget window resets.
+    if (normalizedPatch.status === "paused" && normalizedPatch.pauseReason === undefined) {
+      normalizedPatch.pauseReason = "manual";
+    }
 
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;

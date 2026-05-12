@@ -498,4 +498,49 @@ describe("budgetService", () => {
       }),
     );
   });
+
+  /**
+   * F-111: operator manually re-pauses a budget-paused agent (pauseReason becomes 'manual'
+   * after the updateAgent fix).  When the budget window resets next day, getInvocationBlock
+   * must NOT auto-resume — the operator's intent must survive.
+   */
+  it("F-111: does not auto-resume an agent that was re-paused manually after a budget pause", async () => {
+    const policy = {
+      id: "policy-hb-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "heartbeat_count",
+      windowKind: "calendar_day_utc",
+      amount: 20,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: false,
+      isActive: true,
+    };
+
+    // pauseReason='manual' simulates: budget pause → operator PATCH status=paused
+    // → updateAgent stamps pauseReason='manual' → budget window resets (total=0).
+    const dbStub = createDbStub([
+      [{
+        status: "paused",
+        pauseReason: "manual",
+        companyId: "company-1",
+        name: "Compliance-1",
+      }],
+      [{ status: "active", name: "Paperclip" }],
+      [],
+      [policy],
+      [{ total: 0 }],
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1");
+
+    // No budget block (budget is clear), but resumeScopeFromBudget must NOT fire.
+    expect(block).toBeNull();
+    expect(dbStub.updateSet).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: "idle" }),
+    );
+  });
 });
